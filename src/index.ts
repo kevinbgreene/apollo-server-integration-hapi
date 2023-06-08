@@ -2,6 +2,7 @@ import type {
   Lifecycle,
   ReqRef,
   Request,
+  ResponseObject,
   ResponseToolkit,
   RouteOptions,
   Server,
@@ -15,6 +16,9 @@ import type {
 } from '@apollo/server';
 import type { WithRequired } from '@apollo/utils.withrequired';
 import { HeaderMap } from '@apollo/server';
+import stream from 'node:stream';
+
+const DEFAULT_STATUS_CODE = 200;
 
 export interface HapiContextFunctionArgument {
   request: Request;
@@ -88,25 +92,53 @@ function hapiMiddleware<TContext extends BaseContext>(
       });
 
       if (body.kind === 'complete') {
-        let response = h.response(body.string);
-
-        // set the status code / default status code
-        response = response.code(status || 200);
-
-        // set headers back from apollo response to hapi response
-        for (const [key, value] of headers) {
-          // console.log('HEADER', key, value);
-          response = response.header(key, value);
-        }
+        let response = decorateResponse(
+          h.response(body.string),
+          headers,
+          status,
+        );
 
         return response.takeover();
       }
 
-      throw new Error('Incremental delivery not implemented');
+      const sink = new stream.PassThrough();
+      const response = decorateResponse(h.response(sink), headers, status);
+
+      // Running this in nextTick so that we can return control of the ResponseObject
+      // back to the Hapi framework. We will continue to push to the stream after
+      // Hapi has sent the initial response to the client
+      process.nextTick(async () => {
+        for await (const chunk of body.asyncIterator) {
+          // cork and uncork used to flush stream
+          sink.cork();
+          sink.write(chunk);
+          sink.uncork();
+        }
+
+        sink.end();
+      });
+
+      return response;
     }
 
     return h.continue;
   };
+}
+
+function decorateResponse(
+  response: ResponseObject,
+  headers: HeaderMap,
+  status: number | undefined,
+): ResponseObject {
+  // set headers from apollo response to hapi response
+  for (const [key, value] of headers) {
+    response = response.header(key, value);
+  }
+
+  // set the status code / default status code
+  response = response.code(status ?? DEFAULT_STATUS_CODE);
+
+  return response;
 }
 
 function toGraphqlRequest(request: Request): HTTPGraphQLRequest {

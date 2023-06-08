@@ -67,5 +67,5 @@ defineIntegrationTestSuite(
       },
     };
   },
-  { noIncrementalDelivery: true },
+  { noIncrementalDelivery: false },
 );
